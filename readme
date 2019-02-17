@@ -1,0 +1,35 @@
+weewx-tfrc
+Copyright 2019 Lucas Heijst, Matthew Wall
+Distributed under terms of the GPLv3
+
+This is a driver for weewx that captures data from software-defined radio
+using the tfrec software.
+
+
+===============================================================================
+Installation
+
+0) install pre-requisites
+
+a) install weewx
+    http://weewx.com/docs.html
+b) install rtl-sdr
+    https://github.com/steve-m/librtlsdr
+c) install trfc
+    https://github.com/baycom/tfrec
+
+1) download the driver
+
+wget -O weewx-tfrc.zip https://github.com/matthewwall/weewx-tfrc/archive/master.zip
+
+2) install the driver
+
+sudo wee_extension --install weewx-tfrc.zip
+
+3) configure the driver
+
+sudo wee_config --reconfigure --driver=user.tfrc --no-prompt
+
+4) start weewx
+
+sudo /etc/init.d/weewx start
