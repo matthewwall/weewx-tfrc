@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # This driver is a modified version of the weewx-sdr driver.
 # See: https://github.com/matthewwall/weewx-sdr
-# Copyright 2019 Matthew Wall, Luc Heijst
+# Copyright 2019-2020 Matthew Wall, Luc Heijst
 # Distributed under the terms of the GNU Public License (GPLv3)
 """
 Collect data from tfrec.  
@@ -54,25 +54,63 @@ not yet recognized by your configuration.
 The default for each of these is False.
 
 """
+from __future__ import print_function  # Python 2/3 compatiblity
 from __future__ import with_statement
+import subprocess
+from subprocess import Popen,PIPE
 from subprocess import check_output
 import signal
 from calendar import timegm
-import Queue
 import fnmatch
 import os
 import re
 import subprocess
-import syslog
 import threading
 import time
+
+# Python 2/3 compatiblity
+try:
+    import Queue as queue    # python 2
+except ImportError:
+    import queue            # python 3
+
 import weewx.drivers
 import weewx.units
 from weeutil.weeutil import tobool
 
+try:
+    # Test for new-style weewx logging by trying to import weeutil.logger
+    import weeutil.logger
+    import logging
+    log = logging.getLogger(__name__)
+
+    def logdbg(msg):
+        log.debug(msg)
+
+    def loginf(msg):
+        log.info(msg)
+
+    def logerr(msg):
+        log.error(msg)
+
+except ImportError:
+    # Old-style weewx logging
+    import syslog
+
+    def logmsg(level, msg):
+        syslog.syslog(level, 'tfrc: %s:' % msg)
+
+    def logdbg(msg):
+        logmsg(syslog.LOG_DEBUG, msg)
+
+    def loginf(msg):
+        logmsg(syslog.LOG_INFO, msg)
+
+    def logerr(msg):
+        logmsg(syslog.LOG_ERR, msg)
 
 DRIVER_NAME = 'TFRC'
-DRIVER_VERSION = '0.2'
+DRIVER_VERSION = '0.5'
 
 if weewx.__version__ < "3":
     raise weewx.UnsupportedFeature("weewx 3 is required, found %s" %
@@ -191,20 +229,6 @@ def confeditor_loader():
     return TFRCConfigurationEditor()
 
 
-def logmsg(level, msg):
-    syslog.syslog(level, 'tfrc: %s: %s' %
-                  (threading.currentThread().getName(), msg))
-
-def logdbg(msg):
-    logmsg(syslog.LOG_DEBUG, msg)
-
-def loginf(msg):
-    logmsg(syslog.LOG_INFO, msg)
-
-def logerr(msg):
-    logmsg(syslog.LOG_ERR, msg)
-
-
 class AsyncReader(threading.Thread):
 
     def __init__(self, fd, queue, label):
@@ -233,9 +257,9 @@ class ProcManager():
     def __init__(self):
         self._cmd = None
         self._process = None
-        self.stdout_queue = Queue.Queue()
+        self.stdout_queue = queue.Queue()
         self.stdout_reader = None
-        self.stderr_queue = Queue.Queue()
+        self.stderr_queue = queue.Queue()
         self.stderr_reader = None
 
     def get_pid(self, name):
@@ -269,7 +293,7 @@ class ProcManager():
             self.stderr_reader = AsyncReader(
                 self._process.stderr, self.stderr_queue, 'stderr-thread')
             self.stderr_reader.start()
-        except (OSError, ValueError), e:
+        except (OSError, ValueError)as e:
             raise weewx.WeeWxIOError("failed to start process: %s" % e)
 
     def shutdown(self):
@@ -288,7 +312,7 @@ class ProcManager():
     def get_stderr(self):
         lines = []
         while not self.stderr_queue.empty():
-            lines.append(self.stderr_queue.get())
+            lines.append(self.stderr_queue.get().decode('utf-8'))
         return lines
 
     def get_stdout(self):
@@ -300,13 +324,13 @@ class ProcManager():
         start_time = int(time.time())
         while self.running() and int(time.time()) - start_time < 10:
             try:
-                line = self.stdout_queue.get(True, 3)
+                line = self.stdout_queue.get(True, 3).decode('utf-8')
                 m = ProcManager.TS.search(line)
                 if m and lines:
                     yield lines
                     lines = []
                 lines.append(line) 
-            except Queue.Empty:
+            except queue.Empty:
                 yield lines
                 lines = []
         yield lines
@@ -347,14 +371,15 @@ class TFA(object):
 
 class TFA_1Packet(Packet):
 
-    IDENTIFIER = "%  seq "
-    PATTERN = re.compile('^#\d+ ([\d]+)  .+ID ([0-9a-f]{4}) ([\d.\+-]+) ([\d]+)%  seq ([0-9a-fA-F]+) lowbat ([\d]+) RSSI ([\d]+)')
+    IDENTIFIER = " seq "
+    PATTERN = re.compile('^#\d+ ([\d]+)  .+ID ([0-9a-f]{4}) ([\d.\+-]+) ([\d]+)% seq ([0-9a-fA-F]+) lowbat ([\d]+) RSSI ([\d]+)')
 
     @staticmethod
     def parse_text(payload, lines):
         pkt = dict()
         m = TFA_1Packet.PATTERN.search(lines[0])
         if m:
+            logdbg("tfa1: %s" % lines[0])
             pkt['dateTime'] = int(m.group(1))
             pkt['usUnits'] = weewx.METRIC
             pkt['hardware_id'] = m.group(2)
@@ -366,8 +391,7 @@ class TFA_1Packet(Packet):
             pkt['rssi'] = float(m.group(7))
             pkt = TFA.insert_ids(pkt, TFA_1Packet.__name__)
         else:
-            loginf("TFA_1Packet: unrecognized data: '%s'" % lines[0])
-        ###logdbg("TFA_1Packet=%s" % pkt)
+            loginf("tfa1: unrecognized data: %s" % lines[0])
         lines.pop(0)
         return pkt
 
@@ -390,9 +414,10 @@ class TFA_2Packet(Packet):
         pkt = dict()
         m = TFA_2Packet.PATTERN.search(lines[0])
         if m:
+            logdbg("tfa2: %s" % lines[0])
             pkt = TFA.insert_ids(pkt, TFA_2Packet.__name__)
         else:
-            loginf("TFA_2Packet: unrecognized data: '%s'" % lines[0])
+            loginf("tfa2: unrecognized data: %s" % lines[0])
         lines.pop(0)
         return pkt
 
@@ -444,9 +469,10 @@ class TFA_3Packet(Packet):
         pkt = dict()
         m = TFA_3Packet.PATTERN.search(lines[0])
         if m:
+            logdbg("tfa3: %s" % lines[0])
             pkt = TFA.insert_ids(pkt, TFA_3Packet.__name__)
         else:
-            loginf("TFA_3Packet: unrecognized data: '%s'" % lines[0])
+            loginf("tfa3: unrecognized data: %s" % lines[0])
         lines.pop(0)
         return pkt
 
@@ -465,9 +491,10 @@ class TX22Packet(Packet):
         pkt = dict()
         m = TX22Packet.PATTERN.search(lines[0])
         if m:
+            logdbg("tx22: %s" % lines[0])
             pkt = TFA.insert_ids(pkt, TX22Packet.__name__)
         else:
-            loginf("TX22Packet: unrecognized data: '%s'" % lines[0])
+            loginf("tx22: unrecognized data: %s" % lines[0])
         lines.pop(0)
         return pkt
 
@@ -486,9 +513,10 @@ class WeatherHubPacket(Packet):
         pkt = dict()
         m = WeatherHubPacket.PATTERN.search(lines[0])
         if m:
+            logdbg("whub: %s" % lines[0])
             pkt = TFA.insert_ids(pkt, WeatherHubPacket.__name__)
         else:
-            loginf("WeatherHubPacket: unrecognized data: '%s'" % lines[0])
+            loginf("whub: unrecognized data: %s" % lines[0])
         lines.pop(0)
         return pkt
 
@@ -565,7 +593,7 @@ class PacketFactory(object):
                 if payload.find(parser.IDENTIFIER) >= 0:
                     pkt = parser.parse_text(payload, lines)
                     return pkt
-            logdbg("parse_text: unknown format: payload=%s" % payload)
+            logdbg("info: %s" % payload)
         else:
             logdbg("parse_text failed: lines=%s" % lines)
         lines.pop(0)
@@ -652,7 +680,7 @@ class TFRCDriver(weewx.drivers.AbstractDevice):
                         packet = self.map_to_fields(packet, self._sensor_map)
                         if packet:
                             if packet != self._last_pkt:
-                                logdbg("packet=%s" % packet)
+                                ###logdbg("packet=%s" % packet)
                                 self._last_pkt = packet
                                 self._calculate_deltas(packet)
                                 yield packet
@@ -661,7 +689,7 @@ class TFRCDriver(weewx.drivers.AbstractDevice):
                         elif self._log_unmapped:
                             loginf("unmapped: %s (%s)" % (lines, packet))
                     elif self._log_unknown:
-                        loginf("missed (unparsed): %s" % lines)
+                        logdbg("info: %s" % lines)
             self._mgr.get_stderr() # flush the stderr queue
         else:
             logerr("err: %s" % self._mgr.get_stderr())
@@ -733,6 +761,8 @@ class TFRCDriver(weewx.drivers.AbstractDevice):
         return True if matches else False
 
 
+############################## Conf Editor ############################## 
+
 if __name__ == '__main__':
     import optparse
 
@@ -770,7 +800,7 @@ Hide:
     (options, args) = parser.parse_args()
 
     if options.version:
-        print "tfrc driver version %s" % DRIVER_VERSION
+        print("tfrc driver version %s" % DRIVER_VERSION)
         exit(1)
 
     if options.debug:
@@ -778,7 +808,7 @@ Hide:
 
     if options.action == 'list-supported':
         for pt in PacketFactory.KNOWN_PACKETS:
-            print pt.IDENTIFIER
+            print(pt.IDENTIFIER)
     elif options.action == 'show-detected':
         # display identifiers for detected sensors
         mgr = ProcManager()
@@ -786,7 +816,7 @@ Hide:
                     ld_library_path=options.ld_library_path)
         detected = dict()
         for lines in mgr.get_stdout():
-#            print "out:", lines
+#            print("out:", lines)
             for p in PacketFactory.create(lines):
                 if p:
                     del p['usUnits']
@@ -796,7 +826,7 @@ Hide:
                     if label not in detected:
                         detected[label] = 0
                     detected[label] += 1
-                print detected
+                print(detected)
     else:
         # display output and parsed/unparsed packets
         hidden = [x.strip() for x in options.hidden.split(',')]
@@ -806,14 +836,17 @@ Hide:
         for lines in mgr.get_stdout():
             if 'out' not in hidden and (
                 'empty' not in hidden or len(lines)):
-                print "out:", lines
+                print("out:", lines)
             for p in PacketFactory.create(lines):
                 if p:
                     if 'parsed' not in hidden:
-                        print 'parsed: %s' % p
+                        print('parsed: %s' % p)
                 else:
                     if 'unparsed' not in hidden and (
                         'empty' not in hidden or len(lines)):
-                        print "unparsed:", lines
-        for lines in mgr.get_stderr():
-            print "err:", lines
+                        print("unparsed:", lines)
+        while mgr.running():
+            for lines in mgr.get_stderr():
+                print("data:", lines)
+            for lines in mgr.get_stdout():
+                print("err: ", lines)

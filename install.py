@@ -2,7 +2,7 @@
 # Copyright 2019 Lucas Heijst, Matthew Wall
 # Distributed under the terms of the GNU Public License (GPLv3)
 
-from setup import ExtensionInstaller
+from weecfg.extension import ExtensionInstaller
 
 def loader():
     return TFRCInstaller()
@@ -10,7 +10,7 @@ def loader():
 class TFRCInstaller(ExtensionInstaller):
     def __init__(self):
         super(TFRCInstaller, self).__init__(
-            version="0.1",
+            version="0.5",
             name='tfrc',
             description='Capture data from tfrc',
             author="Matthew Wall",
